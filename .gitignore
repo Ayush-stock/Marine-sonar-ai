@@ -1,0 +1,52 @@
+# Python virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# FastAPI temporary uploads
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Runtime / generated files
+runs/
+results/
+temp_test/
+
+# Old testing files
+test.jpg
+result.jpg
+test.py
+sonar_test.py
+get_target_images.py
+yolov8n-seg.pt
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

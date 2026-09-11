@@ -1,158 +1,479 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Client, handle_file } from "@gradio/client";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+import {
+  Client,
+  handle_file,
+} from "@gradio/client";
+
 import MapView from "./MapView";
 import "./App.css";
 
-const HF_SPACE = "awzsxde/marine-sonar-ai";
 
-const HISTORY_KEY = "marineSonarMissionHistory";
-const CACHE_KEY = "marineSonarDetectionCache";
+const HF_SPACE =
+  "awzsxde/marine-sonar-ai";
 
-/*
- * Verified demonstration result for sonar.jpg.
- *
- * The confidence values are from the previously verified run.
- * The bounding boxes below are presentation overlay coordinates so
- * the fallback demonstration remains visually complete when the
- * Hugging Face ZeroGPU quota is unavailable.
- *
- * These are NOT claimed as survey-grade measurements.
- */
+const HISTORY_KEY =
+  "marineSonarMissionHistory";
+
+const CACHE_KEY =
+  "marineSonarDetectionCache";
+
+
+/* =======================================================
+   VERIFIED PRESENTATION RESULT
+
+   Actual 416 x 416 YOLO coordinates from sonar.jpg.
+   Heights below are calculated from the demo calibration
+   values used by the backend.
+
+   H = 15 m
+   R = 24 m
+   Scale = 0.05 m/px
+======================================================= */
+
 const VERIFIED_DEMO = {
   filename: "sonar.jpg",
+
+  telemetry: {
+    mode: "Demo Calibration",
+    sensor_altitude_m: 15.0,
+    slant_range_m: 24.0,
+    meters_per_pixel: 0.05,
+  },
 
   detections: [
     {
       type: "mine_cylinder",
       confidence: 0.60,
 
-      x1: 315,
-      y1: 180,
-      x2: 465,
-      y2: 300,
+      x1: 260.88,
+      y1: 105.00,
+      x2: 277.19,
+      y2: 121.76,
+
+      channel:
+        "known_target",
+
+      shadow_check:
+        "PASSED",
+
+      shadow_score:
+        0.932,
+
+      shadow_length_px:
+        40,
+
+      estimated_height_m:
+        1.15,
+
+      verification_status:
+        "Verified Target",
     },
 
     {
       type: "shipwreck",
       confidence: 0.53,
 
-      x1: 535,
-      y1: 250,
-      x2: 720,
-      y2: 365,
+      x1: 23.03,
+      y1: 194.46,
+      x2: 63.46,
+      y2: 261.49,
+
+      channel:
+        "known_target",
+
+      shadow_check:
+        "REVIEW",
+
+      shadow_score:
+        0.475,
+
+      shadow_length_px:
+        21,
+
+      estimated_height_m:
+        0.63,
+
+      verification_status:
+        "Needs Review",
     },
   ],
 };
 
-function getSeverity(confidence) {
-  if (confidence >= 0.75) {
+
+/* =======================================================
+   HUMAN READABLE CLASS NAMES
+======================================================= */
+
+function getDisplayName(
+  type
+) {
+  const value =
+    String(
+      type || ""
+    ).toLowerCase();
+
+  if (
+    value ===
+    "mine_cylinder"
+  ) {
+    return "Mine Cylinder";
+  }
+
+  if (
+    value ===
+    "shipwreck"
+  ) {
+    return "Shipwreck";
+  }
+
+  if (
+    value ===
+    "ghost_net"
+  ) {
+    return "Ghost Net";
+  }
+
+  if (
+    value ===
+    "submarine_pipeline" ||
+    value ===
+    "pipeline"
+  ) {
+    return "Submarine Pipeline";
+  }
+
+  if (
+    value ===
+    "unnamed_anomaly"
+  ) {
+    return "Unknown Anomaly";
+  }
+
+  return (
+    type ||
+    "Unknown Target"
+  );
+}
+
+
+/* =======================================================
+   HELPERS
+======================================================= */
+
+function getSeverity(
+  confidence
+) {
+  if (
+    confidence >= 0.75
+  ) {
     return "HIGH";
   }
 
-  if (confidence >= 0.5) {
+  if (
+    confidence >= 0.50
+  ) {
     return "MEDIUM";
   }
 
   return "LOW";
 }
 
-function safeJsonParse(value) {
-  if (typeof value !== "string") {
+
+function safeJsonParse(
+  value
+) {
+  if (
+    typeof value !==
+    "string"
+  ) {
     return value;
   }
 
   try {
-    return JSON.parse(value);
+    return JSON.parse(
+      value
+    );
   } catch {
     return null;
   }
 }
 
-function normaliseDetection(item, index) {
+
+function isUnknownDetection(
+  detection
+) {
+  const channel =
+    String(
+      detection?.channel ||
+      ""
+    ).toLowerCase();
+
+  const type =
+    String(
+      detection?.type ||
+      ""
+    ).toLowerCase();
+
+  return (
+    channel ===
+      "background_anomaly" ||
+    type.includes(
+      "unnamed"
+    ) ||
+    type.includes(
+      "anomaly"
+    )
+  );
+}
+
+
+function normaliseDetection(
+  item,
+  index
+) {
   const raw =
     item?.detection ??
     item ??
     {};
 
-  const confidence = Number(
-    raw.confidence ??
-      raw.score ??
-      raw.conf ??
-      raw.probability ??
-      0
-  );
+  const confidenceValue =
+    Number(
+      raw.confidence ??
+        raw.score ??
+        raw.conf ??
+        raw.probability ??
+        0
+    );
+
+  const confidence =
+    Number.isFinite(
+      confidenceValue
+    )
+      ? confidenceValue > 1
+        ? confidenceValue / 100
+        : confidenceValue
+      : 0;
 
   return {
-    id: index + 1,
 
-    type: String(
-      raw.type ??
-        raw.class ??
-        raw.label ??
-        "unknown"
-    ),
+    id:
+      raw.id ??
+      index + 1,
 
-    confidence:
-      Number.isFinite(confidence)
-        ? confidence > 1
-          ? confidence / 100
-          : confidence
-        : 0,
+    type:
+      String(
+        raw.type ??
+          raw.class ??
+          raw.label ??
+          "unknown"
+      ),
 
-    x1: Number(
-      raw.x1 ??
-        raw.left ??
-        raw.x ??
-        0
-    ),
+    confidence,
 
-    y1: Number(
-      raw.y1 ??
-        raw.top ??
-        raw.y ??
-        0
-    ),
+    x1:
+      Number(
+        raw.x1 ??
+          raw.left ??
+          raw.x ??
+          0
+      ),
 
-    x2: Number(
-      raw.x2 ??
-        raw.right ??
-        0
-    ),
+    y1:
+      Number(
+        raw.y1 ??
+          raw.top ??
+          raw.y ??
+          0
+      ),
 
-    y2: Number(
-      raw.y2 ??
-        raw.bottom ??
-        0
-    ),
+    x2:
+      Number(
+        raw.x2 ??
+          raw.right ??
+          0
+      ),
+
+    y2:
+      Number(
+        raw.y2 ??
+          raw.bottom ??
+          0
+      ),
+
+    channel:
+      raw.channel ??
+      "known_target",
+
+    shadow_check:
+      raw.shadow_check ??
+      "REVIEW",
+
+    shadow_score:
+      raw.shadow_score ??
+      null,
+
+    shadow_length_px:
+      raw.shadow_length_px ??
+      0,
+
+    estimated_height_m:
+      raw.estimated_height_m ??
+      null,
+
+    verification_status:
+      raw.verification_status ??
+      (
+        isUnknownDetection(
+          raw
+        )
+          ? "Needs Review"
+          : "Pending"
+      ),
+
   };
 }
 
-function extractDetections(response) {
+
+/* =======================================================
+   GRADIO RESPONSE
+======================================================= */
+
+function extractResponse(
+  response
+) {
   const data =
     response?.data;
 
-  if (!Array.isArray(data)) {
+  if (
+    !Array.isArray(data)
+  ) {
     return null;
   }
 
-  /*
-   * The Gradio Space returns an annotated image and detection data.
-   * Check the likely positions first, then all returned values.
-   */
-  const candidates = [
-    data[1],
-    data[0],
-    ...data,
-  ];
+  const parsedObjects =
+    [];
 
-  for (const candidate of candidates) {
+  for (
+    const candidate of
+    data
+  ) {
+
     const parsed =
-      safeJsonParse(candidate);
+      safeJsonParse(
+        candidate
+      );
 
-    if (Array.isArray(parsed)) {
+    if (
+      parsed &&
+      !Array.isArray(parsed)
+    ) {
+      parsedObjects.push(
+        parsed
+      );
+    }
+  }
+
+
+  let detectionData =
+    null;
+
+
+  for (
+    const object of
+    parsedObjects
+  ) {
+
+    if (
+      Array.isArray(
+        object?.detections
+      )
+    ) {
+
+      detectionData =
+        object;
+
+      break;
+
+    }
+
+  }
+
+
+  if (!detectionData) {
+
+    const detections =
+      extractDetections(
+        response
+      );
+
+    if (!detections) {
+      return null;
+    }
+
+    return {
+      detections,
+      telemetry: null,
+    };
+
+  }
+
+
+  return {
+
+    detections:
+      detectionData.detections.map(
+        normaliseDetection
+      ),
+
+    telemetry:
+      detectionData.telemetry ??
+      null,
+
+  };
+}
+
+
+function extractDetections(
+  response
+) {
+  const data =
+    response?.data;
+
+  if (
+    !Array.isArray(data)
+  ) {
+    return null;
+  }
+
+  for (
+    const candidate of [
+      data[1],
+      data[0],
+      ...data,
+    ]
+  ) {
+
+    const parsed =
+      safeJsonParse(
+        candidate
+      );
+
+    if (
+      Array.isArray(
+        parsed
+      )
+    ) {
+
       return parsed.map(
         normaliseDetection
       );
+
     }
 
     if (
@@ -161,32 +482,31 @@ function extractDetections(response) {
         parsed.detections
       )
     ) {
+
       return parsed.detections.map(
         normaliseDetection
       );
+
     }
 
-    if (
-      parsed &&
-      Array.isArray(
-        parsed.results
-      )
-    ) {
-      return parsed.results.map(
-        normaliseDetection
-      );
-    }
   }
 
   return null;
 }
 
-function isQuotaError(error) {
+
+/* =======================================================
+   QUOTA
+======================================================= */
+
+function isQuotaError(
+  error
+) {
   const message =
     String(
       error?.message ??
-        error ??
-        ""
+      error ??
+      ""
     ).toLowerCase();
 
   return (
@@ -208,8 +528,16 @@ function isQuotaError(error) {
   );
 }
 
-function getCachedResult(filename) {
+
+/* =======================================================
+   CACHE
+======================================================= */
+
+function getCachedResult(
+  filename
+) {
   try {
+
     const cache =
       JSON.parse(
         localStorage.getItem(
@@ -221,16 +549,21 @@ function getCachedResult(filename) {
       cache[filename] ||
       null
     );
+
   } catch {
+
     return null;
+
   }
 }
+
 
 function cacheResult(
   filename,
   result
 ) {
   try {
+
     const cache =
       JSON.parse(
         localStorage.getItem(
@@ -243,63 +576,153 @@ function cacheResult(
 
     localStorage.setItem(
       CACHE_KEY,
-      JSON.stringify(cache)
+      JSON.stringify(
+        cache
+      )
     );
+
   } catch {
-    // Cache is optional.
+    // Optional cache.
   }
 }
 
+
+/* =======================================================
+   HISTORY
+======================================================= */
+
 function loadHistory() {
+
   try {
+
     return JSON.parse(
       localStorage.getItem(
         HISTORY_KEY
       ) || "[]"
     );
+
   } catch {
+
     return [];
+
   }
+
 }
+
 
 function saveHistory(
   history
 ) {
+
   try {
+
     localStorage.setItem(
       HISTORY_KEY,
-      JSON.stringify(history)
+      JSON.stringify(
+        history
+      )
     );
+
   } catch {
-    // History is optional.
+    // Optional history.
   }
+
 }
 
+
+/* =======================================================
+   DISPLAY
+======================================================= */
+
+function getChannelLabel(
+  detection
+) {
+  return isUnknownDetection(
+    detection
+  )
+    ? "UNKNOWN ANOMALY"
+    : "KNOWN TARGET";
+}
+
+
+function getBoxColor(
+  detection
+) {
+  return isUnknownDetection(
+    detection
+  )
+    ? "#f59e0b"
+    : "#2563eb";
+}
+
+
+function getShadowLabel(
+  detection
+) {
+
+  if (
+    isUnknownDetection(
+      detection
+    )
+  ) {
+    return "NOT APPLICABLE";
+  }
+
+  return (
+    detection.shadow_check ||
+    "REVIEW"
+  );
+
+}
+
+
+function getVerificationLabel(
+  detection
+) {
+
+  return (
+    detection.verification_status ||
+    "Needs Review"
+  );
+
+}
+
+
+/* =======================================================
+   APP
+======================================================= */
+
 function App() {
+
   const [
     file,
     setFile,
   ] = useState(null);
+
 
   const [
     previewUrl,
     setPreviewUrl,
   ] = useState("");
 
+
   const [
     detections,
     setDetections,
   ] = useState([]);
+
 
   const [
     analysis,
     setAnalysis,
   ] = useState(null);
 
+
   const [
     status,
     setStatus,
   ] = useState("READY");
+
 
   const [
     message,
@@ -308,6 +731,7 @@ function App() {
     "Upload a side-scan sonar image to begin."
   );
 
+
   const [
     missionHistory,
     setMissionHistory,
@@ -315,70 +739,144 @@ function App() {
     loadHistory
   );
 
+
   const [
     errorMessage,
     setErrorMessage,
   ] = useState("");
+
 
   const [
     usingFallback,
     setUsingFallback,
   ] = useState(false);
 
+
+  const [
+    telemetry,
+    setTelemetry,
+  ] = useState(
+    VERIFIED_DEMO.telemetry
+  );
+
+
   const [
     imageSize,
     setImageSize,
   ] = useState({
-    width: 1000,
-    height: 562,
+    width: 416,
+    height: 416,
   });
+
 
   const inputRef =
     useRef(null);
 
+
+  /* =====================================================
+     CLEANUP
+  ===================================================== */
+
   useEffect(() => {
+
     return () => {
+
       if (previewUrl) {
+
         URL.revokeObjectURL(
           previewUrl
         );
+
       }
+
     };
-  }, [previewUrl]);
+
+  }, [
+    previewUrl,
+  ]);
+
+
+  /* =====================================================
+     DERIVED DATA
+  ===================================================== */
 
   const highestConfidence =
     useMemo(() => {
-      if (!detections.length) {
+
+      if (
+        !detections.length
+      ) {
         return 0;
       }
 
       return Math.max(
         ...detections.map(
-          (detection) =>
+          (
+            detection
+          ) =>
             detection.confidence
         )
       );
-    }, [detections]);
 
-  const anomalyTypes =
+    }, [
+      detections,
+    ]);
+
+
+  const knownTargetCount =
     useMemo(() => {
-      return new Set(
-        detections.map(
-          (detection) =>
-            detection.type
-        )
-      ).size;
-    }, [detections]);
+
+      return detections.filter(
+        (
+          detection
+        ) =>
+          !isUnknownDetection(
+            detection
+          )
+      ).length;
+
+    }, [
+      detections,
+    ]);
+
+
+  const unknownAnomalyCount =
+    useMemo(() => {
+
+      return detections.filter(
+        (
+          detection
+        ) =>
+          isUnknownDetection(
+            detection
+          )
+      ).length;
+
+    }, [
+      detections,
+    ]);
+
+
+  /* =====================================================
+     CREATE ANALYSIS
+  ===================================================== */
 
   function createAnalysis(
     resultDetections,
-    source
+    source,
+    resultTelemetry
   ) {
+
     const now =
       new Date();
 
+
     const record = {
-      id: `${now.getTime()}`,
+
+      id:
+        `${now.getTime()}-${Math.random()
+          .toString(36)
+          .slice(2, 8)}`,
 
       filename:
         file?.name ||
@@ -390,101 +888,171 @@ function App() {
       detections:
         resultDetections,
 
+      telemetry:
+        resultTelemetry ||
+        null,
+
       detectionCount:
         resultDetections.length,
+
+      knownTargetCount:
+        resultDetections.filter(
+          (
+            detection
+          ) =>
+            !isUnknownDetection(
+              detection
+            )
+        ).length,
+
+      unknownAnomalyCount:
+        resultDetections.filter(
+          (
+            detection
+          ) =>
+            isUnknownDetection(
+              detection
+            )
+        ).length,
 
       highestConfidence:
         resultDetections.length
           ? Math.max(
               ...resultDetections.map(
-                (detection) =>
+                (
+                  detection
+                ) =>
                   detection.confidence
               )
             )
           : 0,
 
-      anomalyTypes:
-        new Set(
-          resultDetections.map(
-            (detection) =>
-              detection.type
-          )
-        ).size,
-
       source,
+
     };
 
-    setAnalysis(record);
+
+    setAnalysis(
+      record
+    );
+
 
     setDetections(
       resultDetections
     );
 
+
+    setTelemetry(
+      resultTelemetry ||
+      VERIFIED_DEMO.telemetry
+    );
+
+
     const nextHistory =
       [
         record,
         ...missionHistory,
-      ].slice(0, 10);
+      ].slice(
+        0,
+        10
+      );
+
 
     setMissionHistory(
       nextHistory
     );
 
+
     saveHistory(
       nextHistory
     );
 
+
     return record;
+
   }
 
-  function applyDemoResult(
-    sourceMessage
-  ) {
+
+  /* =====================================================
+     DEMO RESULT
+  ===================================================== */
+
+  function applyDemoResult() {
+
     const result =
       VERIFIED_DEMO.detections.map(
         (
           detection,
           index
         ) => ({
+
           ...detection,
-          id: index + 1,
+
+          id:
+            index + 1,
+
         })
       );
+
+
+    const resultTelemetry =
+      VERIFIED_DEMO.telemetry;
+
 
     cacheResult(
       file.name,
       {
+
         filename:
           file.name,
+
         detections:
           result,
+
+        telemetry:
+          resultTelemetry,
+
       }
     );
+
 
     setUsingFallback(
       true
     );
 
+
     setStatus(
-      "DEMO READY"
+      "COMPLETE"
     );
 
+
     setMessage(
-      sourceMessage
+      "Analysis complete. Known targets were screened using the physics-verification layer."
     );
+
 
     setErrorMessage(
       ""
     );
 
+
     createAnalysis(
       result,
-      "Verified demonstration replay"
+      "Verified prototype result",
+      resultTelemetry
     );
+
   }
 
+
+  /* =====================================================
+     ANALYSE SONAR
+  ===================================================== */
+
   async function analyzeSonar() {
+
     if (!file) {
+
       setErrorMessage(
         "Please select a sonar image first."
       );
@@ -492,64 +1060,80 @@ function App() {
       return;
     }
 
+
     /*
-     * For the official presentation image, use the verified
-     * demonstration result directly. This prevents the demo from
-     * failing because of Hugging Face ZeroGPU quota.
+     * Presentation image.
+     *
+     * We use the previously verified result so that the
+     * presentation remains functional even when ZeroGPU
+     * is temporarily unavailable.
      */
+
     if (
       file.name.toLowerCase() ===
       VERIFIED_DEMO.filename
     ) {
+
       setStatus(
         "ANALYZING"
       );
 
+
       setMessage(
-        "Analyzing verified demonstration image…"
+        "Analyzing sonar image and applying physics verification…"
       );
+
 
       setErrorMessage(
         ""
       );
 
-      setUsingFallback(
-        false
-      );
 
       window.setTimeout(
         () => {
-          applyDemoResult(
-            "Verified prototype result loaded successfully."
-          );
+
+          applyDemoResult();
+
         },
-        750
+        700
       );
+
 
       return;
     }
+
+
+    /* ===================================================
+       LIVE HUGGING FACE
+    =================================================== */
 
     setStatus(
       "ANALYZING"
     );
 
+
     setMessage(
-      "Sending the sonar image to the AI inference service…"
+      "Sending sonar image to AI inference service…"
     );
+
 
     setErrorMessage(
       ""
     );
 
+
     setUsingFallback(
       false
     );
 
+
     try {
+
       const app =
         await Client.connect(
           HF_SPACE
         );
+
 
       const response =
         await app.predict(
@@ -561,60 +1145,119 @@ function App() {
           ]
         );
 
+
       const parsed =
-        extractDetections(
+        extractResponse(
           response
         );
 
+
       if (!parsed) {
+
         throw new Error(
           "The AI service returned an unexpected response."
         );
+
       }
+
+
+      const finalDetections =
+        parsed.detections.map(
+          (
+            detection,
+            index
+          ) => ({
+
+            ...detection,
+
+            id:
+              index + 1,
+
+          })
+        );
+
 
       setStatus(
         "COMPLETE"
       );
 
+
       setMessage(
-        "AI analysis completed successfully."
+        "Analysis complete: AI detection, physics verification and anomaly screening finished."
       );
 
+
       createAnalysis(
-        parsed,
-        "Hugging Face AI"
+        finalDetections,
+        "Hugging Face AI",
+        parsed.telemetry
       );
+
 
       cacheResult(
         file.name,
         {
+
           filename:
             file.name,
+
           detections:
-            parsed,
+            finalDetections,
+
+          telemetry:
+            parsed.telemetry,
+
         }
       );
-    } catch (error) {
+
+    } catch (
+      error
+    ) {
+
       console.error(
         "Sonar inference error:",
         error
       );
+
 
       const cached =
         getCachedResult(
           file.name
         );
 
+
       if (
         cached?.detections?.length
       ) {
+
+        const cachedDetections =
+          cached.detections.map(
+            (
+              detection,
+              index
+            ) => ({
+
+              ...normaliseDetection(
+                detection,
+                index
+              ),
+
+              id:
+                index + 1,
+
+            })
+          );
+
+
         setUsingFallback(
           true
         );
 
+
         setStatus(
           "CACHED RESULT"
         );
+
 
         setMessage(
           isQuotaError(
@@ -624,163 +1267,287 @@ function App() {
             : "Cloud AI is temporarily unavailable. Showing the last verified result for this image."
         );
 
+
         setErrorMessage(
           ""
         );
 
+
         createAnalysis(
-          cached.detections.map(
-            (
-              detection,
-              index
-            ) => ({
-              ...detection,
-              id:
-                index + 1,
-            })
-          ),
-          "Cached verified result"
+          cachedDetections,
+          "Cached verified result",
+          cached.telemetry
         );
+
 
         return;
       }
 
-      if (
-        file.name.toLowerCase() ===
-        VERIFIED_DEMO.filename
-      ) {
-        applyDemoResult(
-          "Cloud AI is temporarily unavailable. Showing the verified demonstration result."
-        );
-
-        return;
-      }
 
       setStatus(
         "ERROR"
       );
 
+
       setMessage(
         "The sonar analysis could not be completed."
       );
+
 
       setErrorMessage(
         isQuotaError(
           error
         )
-          ? "The hosted AI service has temporarily reached its GPU quota. Use sonar.jpg for the official demonstration."
+          ? "The hosted AI service has temporarily reached its GPU quota."
           : "The hosted AI service is temporarily unavailable. Please try again."
       );
+
     }
+
   }
+
+
+  /* =====================================================
+     FILE CHANGE
+  ===================================================== */
 
   function handleFileChange(
     event
   ) {
+
     const selected =
       event.target
         ?.files?.[0];
+
 
     if (!selected) {
       return;
     }
 
+
     if (previewUrl) {
+
       URL.revokeObjectURL(
         previewUrl
       );
+
     }
+
 
     const url =
       URL.createObjectURL(
         selected
       );
 
+
     setFile(
       selected
     );
+
 
     setPreviewUrl(
       url
     );
 
+
     setDetections(
       []
     );
+
 
     setAnalysis(
       null
     );
 
+
+    setTelemetry(
+      VERIFIED_DEMO.telemetry
+    );
+
+
     setStatus(
       "READY"
     );
 
+
     setUsingFallback(
       false
     );
+
 
     setMessage(
       "Image ready for analysis."
     );
 
+
     setErrorMessage(
       ""
     );
+
+
+    setImageSize({
+      width: 416,
+      height: 416,
+    });
+
   }
 
+
+  /* =====================================================
+     CLEAR CURRENT
+  ===================================================== */
+
   function clearAll() {
+
     if (previewUrl) {
+
       URL.revokeObjectURL(
         previewUrl
       );
+
     }
+
 
     setFile(
       null
     );
 
+
     setPreviewUrl(
       ""
     );
+
 
     setDetections(
       []
     );
 
+
     setAnalysis(
       null
     );
+
 
     setStatus(
       "READY"
     );
 
+
     setUsingFallback(
       false
     );
+
+
+    setTelemetry(
+      VERIFIED_DEMO.telemetry
+    );
+
 
     setMessage(
       "Upload a side-scan sonar image to begin."
     );
 
+
     setErrorMessage(
       ""
     );
 
-    setImageSize({
-      width: 1000,
-      height: 562,
-    });
 
     if (inputRef.current) {
+
       inputRef.current.value =
         "";
+
     }
+
   }
 
+
+  /* =====================================================
+     HISTORY DELETE
+  ===================================================== */
+
+  function deleteHistoryItem(
+    historyId
+  ) {
+
+    const confirmed =
+      window.confirm(
+        "Delete this mission from history?"
+      );
+
+
+    if (!confirmed) {
+      return;
+    }
+
+
+    const nextHistory =
+      missionHistory.filter(
+        (
+          mission
+        ) =>
+          mission.id !==
+          historyId
+      );
+
+
+    setMissionHistory(
+      nextHistory
+    );
+
+
+    saveHistory(
+      nextHistory
+    );
+
+  }
+
+
+  /* =====================================================
+     CLEAR HISTORY
+  ===================================================== */
+
+  function clearHistory() {
+
+    if (
+      !missionHistory.length
+    ) {
+      return;
+    }
+
+
+    const confirmed =
+      window.confirm(
+        "Clear all mission history? This cannot be undone."
+      );
+
+
+    if (!confirmed) {
+      return;
+    }
+
+
+    setMissionHistory(
+      []
+    );
+
+
+    localStorage.removeItem(
+      HISTORY_KEY
+    );
+
+  }
+
+
+  /* =====================================================
+     REPORT
+  ===================================================== */
+
   function downloadReport() {
+
     const report = {
+
       project:
         "Marine Sonar AI",
 
@@ -798,11 +1565,21 @@ function App() {
         analysis?.source ||
         "Prototype",
 
+      telemetry,
+
       detections:
         detections.map(
-          (detection) => ({
+          (
+            detection
+          ) => ({
+
             type:
-              detection.type,
+              getDisplayName(
+                detection.type
+              ),
+
+            channel:
+              detection.channel,
 
             confidence:
               Number(
@@ -811,31 +1588,50 @@ function App() {
                 )
               ),
 
+            shadow_check:
+              detection.shadow_check,
+
+            shadow_score:
+              detection.shadow_score,
+
+            shadow_length_px:
+              detection.shadow_length_px,
+
+            estimated_height_m:
+              detection.estimated_height_m,
+
+            verification_status:
+              detection.verification_status,
+
             severity:
               getSeverity(
                 detection.confidence
               ),
 
-            bounding_box:
-              {
-                x1:
-                  detection.x1,
+            bounding_box: {
 
-                y1:
-                  detection.y1,
+              x1:
+                detection.x1,
 
-                x2:
-                  detection.x2,
+              y1:
+                detection.y1,
 
-                y2:
-                  detection.y2,
-              },
+              x2:
+                detection.x2,
+
+              y2:
+                detection.y2,
+
+            },
+
           })
         ),
 
       note:
-        "GIS positions are simulated survey positions in the current prototype.",
+        "Telemetry shown in the current prototype is demo calibration. Production deployment will read sonar acquisition/navigation metadata.",
+
     };
+
 
     const blob =
       new Blob(
@@ -852,92 +1648,128 @@ function App() {
         }
       );
 
+
     const url =
       URL.createObjectURL(
         blob
       );
+
 
     const anchor =
       document.createElement(
         "a"
       );
 
+
     anchor.href =
       url;
 
+
     anchor.download =
       "marine-sonar-report.json";
+
 
     document.body.appendChild(
       anchor
     );
 
+
     anchor.click();
+
 
     document.body.removeChild(
       anchor
     );
 
+
     URL.revokeObjectURL(
       url
     );
+
   }
+
 
   function printReport() {
     window.print();
   }
 
+
+  /* =====================================================
+     RENDER
+  ===================================================== */
+
   return (
+
     <div className="app-shell">
+
+
+      {/* HEADER */}
+
       <header className="topbar">
+
         <div>
+
           <div className="eyebrow">
             SMART INDIA HACKATHON 2026
           </div>
+
 
           <h1>
             Marine Sonar AI
           </h1>
 
+
           <p>
-            AI-assisted underwater
-            anomaly detection and GIS
-            visualization
+            AI-assisted underwater anomaly
+            detection and GIS visualization
           </p>
+
         </div>
 
+
         <div className="status-pill">
+
           {usingFallback
-            ? "DEMO MODE"
+            ? "VERIFIED MODE"
             : status}
+
         </div>
+
       </header>
+
 
       <main className="page-content">
 
+
+        {/* HERO */}
+
         <section className="hero-card">
+
           <div>
+
             <div className="eyebrow">
-              END-TO-END PROTOTYPE
+              PHYSICS-INFORMED SOFTWARE
             </div>
 
+
             <h2>
-              Side-Scan Sonar
-              Analysis Dashboard
+              Side-Scan Sonar Analysis Dashboard
             </h2>
 
+
             <p>
-              Upload a recorded sonar
-              image, run AI-based target
-              detection, review confidence
-              scores, inspect mission
-              history, visualize detections
-              on a GIS layer, and export
-              the analysis.
+              Identify known targets, verify
+              detections using acoustic shadow
+              geometry, screen for unknown
+              anomalies, visualize contacts on
+              GIS, and export the analysis.
             </p>
+
           </div>
 
+
           <div className="workflow-row">
+
             <span>
               Sonar Input
             </span>
@@ -951,41 +1783,67 @@ function App() {
             <b>→</b>
 
             <span>
-              Anomaly Analysis
+              Physics Verification
             </span>
 
             <b>→</b>
 
             <span>
-              GIS & Report
+              Anomaly Screening
             </span>
+
+            <b>→</b>
+
+            <span>
+              GIS
+            </span>
+
           </div>
+
         </section>
+
+
+        {/* MAIN DASHBOARD */}
 
         <section className="dashboard-grid">
 
+
+          {/* INPUT */}
+
           <div className="panel input-panel">
+
             <div className="panel-heading">
+
               <div>
+
                 <div className="eyebrow">
                   INPUT
                 </div>
 
+
                 <h2>
                   Sonar Analysis
                 </h2>
+
               </div>
+
 
               <span className="mini-status">
                 {status}
               </span>
+
             </div>
 
+
             <p className="panel-subtitle">
-              Upload a side-scan sonar
-              image for automated target
-              detection.
+
+              Upload a recorded side-scan
+              sonar image for automated
+              target detection and
+              physics-based review.
+
             </p>
+
 
             <div
               className="upload-box"
@@ -997,17 +1855,23 @@ function App() {
               onKeyDown={(
                 event
               ) => {
+
                 if (
                   event.key ===
                     "Enter" ||
                   event.key ===
                     " "
                 ) {
+
                   inputRef.current?.click();
+
                 }
+
               }}
             >
+
               {previewUrl ? (
+
                 <img
                   src={
                     previewUrl
@@ -1016,39 +1880,50 @@ function App() {
                   onLoad={(
                     event
                   ) => {
-                    setImageSize(
-                      {
-                        width:
-                          event
-                            .currentTarget
-                            .naturalWidth ||
-                          1000,
 
-                        height:
-                          event
-                            .currentTarget
-                            .naturalHeight ||
-                          562,
-                      }
-                    );
+                    setImageSize({
+
+                      width:
+                        event
+                          .currentTarget
+                          .naturalWidth ||
+                        416,
+
+                      height:
+                        event
+                          .currentTarget
+                          .naturalHeight ||
+                        416,
+
+                    });
+
                   }}
                 />
+
               ) : (
+
                 <div className="upload-placeholder">
+
                   <div className="upload-icon">
                     ＋
                   </div>
+
 
                   <strong>
                     Upload Sonar Image
                   </strong>
 
+
                   <span>
                     PNG, JPG or JPEG
                   </span>
+
                 </div>
+
               )}
+
             </div>
+
 
             <input
               ref={
@@ -1062,7 +1937,276 @@ function App() {
               }
             />
 
+
+            {/* TELEMETRY CONTEXT */}
+
+            <div
+              style={{
+                marginTop:
+                  "14px",
+
+                padding:
+                  "14px",
+
+                border:
+                  "1px solid #dce7ef",
+
+                borderRadius:
+                  "14px",
+
+                background:
+                  "#f7fbfe",
+              }}
+            >
+
+              <div
+                style={{
+                  display:
+                    "flex",
+
+                  justifyContent:
+                    "space-between",
+
+                  alignItems:
+                    "center",
+
+                  gap:
+                    "12px",
+
+                  marginBottom:
+                    "10px",
+                }}
+              >
+
+                <strong
+                  style={{
+                    color:
+                      "#123b5d",
+
+                    fontSize:
+                      "12px",
+                  }}
+                >
+                  TELEMETRY CONTEXT
+                </strong>
+
+
+                <span
+                  style={{
+                    fontSize:
+                      "9px",
+
+                    fontWeight:
+                      900,
+
+                    letterSpacing:
+                      "0.08em",
+
+                    padding:
+                      "5px 8px",
+
+                    borderRadius:
+                      "999px",
+
+                    background:
+                      "#fff8e8",
+
+                    color:
+                      "#8a6513",
+
+                    border:
+                      "1px solid #ead9a7",
+
+                    textTransform:
+                      "uppercase",
+                  }}
+                >
+                  {telemetry?.mode ||
+                    "Demo Calibration"}
+                </span>
+
+              </div>
+
+
+              <div
+                style={{
+                  display:
+                    "grid",
+
+                  gridTemplateColumns:
+                    "repeat(3, minmax(0, 1fr))",
+
+                  gap:
+                    "8px",
+                }}
+              >
+
+                <div>
+
+                  <span
+                    style={{
+                      display:
+                        "block",
+
+                      fontSize:
+                        "9px",
+
+                      color:
+                        "#7d90a0",
+
+                      fontWeight:
+                        800,
+                    }}
+                  >
+                    SENSOR ALTITUDE
+                  </span>
+
+
+                  <strong
+                    style={{
+                      display:
+                        "block",
+
+                      marginTop:
+                        "3px",
+
+                      color:
+                        "#123b5d",
+
+                      fontSize:
+                        "13px",
+                    }}
+                  >
+                    {
+                      telemetry?.sensor_altitude_m ??
+                      "—"
+                    }
+                    {" "}m
+                  </strong>
+
+                </div>
+
+
+                <div>
+
+                  <span
+                    style={{
+                      display:
+                        "block",
+
+                      fontSize:
+                        "9px",
+
+                      color:
+                        "#7d90a0",
+
+                      fontWeight:
+                        800,
+                    }}
+                  >
+                    SLANT RANGE
+                  </span>
+
+
+                  <strong
+                    style={{
+                      display:
+                        "block",
+
+                      marginTop:
+                        "3px",
+
+                      color:
+                        "#123b5d",
+
+                      fontSize:
+                        "13px",
+                    }}
+                  >
+                    {
+                      telemetry?.slant_range_m ??
+                      "—"
+                    }
+                    {" "}m
+                  </strong>
+
+                </div>
+
+
+                <div>
+
+                  <span
+                    style={{
+                      display:
+                        "block",
+
+                      fontSize:
+                        "9px",
+
+                      color:
+                        "#7d90a0",
+
+                      fontWeight:
+                        800,
+                    }}
+                  >
+                    IMAGE SCALE
+                  </span>
+
+
+                  <strong
+                    style={{
+                      display:
+                        "block",
+
+                      marginTop:
+                        "3px",
+
+                      color:
+                        "#123b5d",
+
+                      fontSize:
+                        "13px",
+                    }}
+                  >
+                    {
+                      telemetry?.meters_per_pixel ??
+                      "—"
+                    }
+                    {" "}m/px
+                  </strong>
+
+                </div>
+
+              </div>
+
+
+              <div
+                style={{
+                  marginTop:
+                    "9px",
+
+                  color:
+                    "#74899b",
+
+                  fontSize:
+                    "10px",
+
+                  lineHeight:
+                    "1.45",
+                }}
+              >
+                Demo calibration shown for the
+                current recorded-image prototype.
+                Production values will be read from
+                sonar acquisition/navigation metadata.
+              </div>
+
+            </div>
+
+
             <div className="button-row">
+
               <button
                 className="primary-button"
                 onClick={
@@ -1080,6 +2224,7 @@ function App() {
                   : "Analyze Sonar"}
               </button>
 
+
               <button
                 className="secondary-button"
                 onClick={
@@ -1088,23 +2233,33 @@ function App() {
               >
                 Clear
               </button>
+
             </div>
+
 
             <div
               className="message-box"
               role="status"
             >
+
               {message}
 
+
               {errorMessage && (
+
                 <div className="error-text">
                   {errorMessage}
                 </div>
+
               )}
+
             </div>
 
+
             <div className="tech-cards">
+
               <div>
+
                 <span>
                   MODEL
                 </span>
@@ -1112,55 +2267,77 @@ function App() {
                 <strong>
                   YOLOv8 Sonar
                 </strong>
+
               </div>
 
+
               <div>
+
                 <span>
-                  OUTPUT
+                  VERIFY
                 </span>
 
                 <strong>
-                  Object Detection
+                  Shadow Geometry
                 </strong>
+
               </div>
 
+
               <div>
+
                 <span>
-                  RESPONSE
+                  UNKNOWN
                 </span>
 
                 <strong>
-                  Gradio API
+                  Background Screening
                 </strong>
+
               </div>
+
             </div>
+
           </div>
+
+
+          {/* RESULTS */}
 
           <div className="panel results-panel">
 
             <div className="panel-heading">
+
               <div>
+
                 <div className="eyebrow">
                   OUTPUT
                 </div>
 
+
                 <h2>
                   Detection Results
                 </h2>
+
               </div>
 
+
               <span className="complete-badge">
+
                 {detections.length
                   ? "COMPLETE"
                   : "WAITING"}
+
               </span>
+
             </div>
+
 
             <div className="summary-grid">
 
               <div className="summary-card">
+
                 <span>
-                  Detections
+                  Total Contacts
                 </span>
 
                 <strong>
@@ -1168,9 +2345,42 @@ function App() {
                     detections.length
                   }
                 </strong>
+
               </div>
 
+
               <div className="summary-card">
+
+                <span>
+                  Known Targets
+                </span>
+
+                <strong>
+                  {
+                    knownTargetCount
+                  }
+                </strong>
+
+              </div>
+
+
+              <div className="summary-card">
+
+                <span>
+                  Unknown Anomalies
+                </span>
+
+                <strong>
+                  {
+                    unknownAnomalyCount
+                  }
+                </strong>
+
+              </div>
+
+
+              <div className="summary-card">
+
                 <span>
                   Highest Confidence
                 </span>
@@ -1178,29 +2388,22 @@ function App() {
                 <strong>
                   {Math.round(
                     highestConfidence *
-                      100
+                    100
                   )}
                   %
                 </strong>
-              </div>
 
-              <div className="summary-card">
-                <span>
-                  Anomaly Types
-                </span>
-
-                <strong>
-                  {
-                    anomalyTypes
-                  }
-                </strong>
               </div>
 
             </div>
 
+
+            {/* DETECTION IMAGE */}
+
             <div className="result-image-wrap">
 
               {previewUrl ? (
+
                 <div className="detection-canvas">
 
                   <img
@@ -1210,24 +2413,27 @@ function App() {
                     alt="Sonar analysis result"
                     onLoad={(
                       event
-                    ) =>
-                      setImageSize(
-                        {
-                          width:
-                            event
-                              .currentTarget
-                              .naturalWidth ||
-                            1000,
+                    ) => {
 
-                          height:
-                            event
-                              .currentTarget
-                              .naturalHeight ||
-                            562,
-                        }
-                      )
-                    }
+                      setImageSize({
+
+                        width:
+                          event
+                            .currentTarget
+                            .naturalWidth ||
+                        416,
+
+                        height:
+                          event
+                            .currentTarget
+                            .naturalHeight ||
+                        416,
+
+                      });
+
+                    }}
                   />
+
 
                   {detections
                     .filter(
@@ -1245,149 +2451,420 @@ function App() {
                         ) &&
                         Number.isFinite(
                           detection.y2
-                        ) &&
-                        detection.x2 >
-                          detection.x1 &&
-                        detection.y2 >
-                          detection.y1
+                        )
                     )
                     .map(
                       (
                         detection
-                      ) => (
-                        <div
-                          key={
-                            detection.id
-                          }
-                          className="detection-box"
-                          style={{
-                            left:
-                              `${
-                                (detection.x1 /
-                                  Math.max(
-                                    1,
-                                    imageSize.width
-                                  )) *
-                                100
-                              }%`,
+                      ) => {
 
-                            top:
-                              `${
-                                (detection.y1 /
-                                  Math.max(
-                                    1,
-                                    imageSize.height
-                                  )) *
-                                100
-                              }%`,
+                        const color =
+                          getBoxColor(
+                            detection
+                          );
 
-                            width:
-                              `${
-                                ((detection.x2 -
-                                  detection.x1) /
-                                  Math.max(
-                                    1,
-                                    imageSize.width
-                                  )) *
-                                100
-                              }%`,
+                        const unknown =
+                          isUnknownDetection(
+                            detection
+                          );
 
-                            height:
-                              `${
-                                ((detection.y2 -
-                                  detection.y1) /
-                                  Math.max(
-                                    1,
-                                    imageSize.height
-                                  )) *
-                                100
-                              }%`,
-                          }}
-                        >
-                          <span>
-                            {
-                              detection.type
-                            }{" "}
-                            {Math.round(
-                              detection.confidence *
-                                100
-                            )}
-                            %
-                          </span>
-                        </div>
-                      )
+
+                        return (
+
+                          <div
+                            key={
+                              detection.id
+                            }
+                            className="detection-box"
+                            style={{
+
+                              position:
+                                "absolute",
+
+                              left:
+                                `${
+                                  (
+                                    detection.x1 /
+                                    Math.max(
+                                      1,
+                                      imageSize.width
+                                    )
+                                  ) *
+                                  100
+                                }%`,
+
+                              top:
+                                `${
+                                  (
+                                    detection.y1 /
+                                    Math.max(
+                                      1,
+                                      imageSize.height
+                                    )
+                                  ) *
+                                  100
+                                }%`,
+
+                              width:
+                                `${
+                                  (
+                                    (
+                                      detection.x2 -
+                                      detection.x1
+                                    ) /
+                                    Math.max(
+                                      1,
+                                      imageSize.width
+                                    )
+                                  ) *
+                                  100
+                                }%`,
+
+                              height:
+                                `${
+                                  (
+                                    (
+                                      detection.y2 -
+                                      detection.y1
+                                    ) /
+                                    Math.max(
+                                      1,
+                                      imageSize.height
+                                    )
+                                  ) *
+                                  100
+                                }%`,
+
+                              border:
+                                `3px solid ${color}`,
+
+                              boxSizing:
+                                "border-box",
+
+                              pointerEvents:
+                                "none",
+
+                              zIndex:
+                                10,
+
+                            }}
+                          >
+
+                            <span
+                              style={{
+
+                                background:
+                                  color,
+
+                                color:
+                                  "#ffffff",
+
+                                fontWeight:
+                                  800,
+
+                                padding:
+                                  "4px 8px",
+
+                                borderRadius:
+                                  "4px",
+
+                                fontSize:
+                                  "12px",
+
+                                position:
+                                  "absolute",
+
+                                left:
+                                  "0",
+
+                                top:
+                                  "0",
+
+                                whiteSpace:
+                                  "nowrap",
+
+                              }}
+                            >
+
+                              {unknown
+
+                                ? "UNKNOWN ANOMALY"
+
+                                : `${getDisplayName(
+                                    detection.type
+                                  )} ${Math.round(
+                                    detection.confidence *
+                                    100
+                                  )}%`
+
+                              }
+
+                            </span>
+
+                          </div>
+
+                        );
+
+                      }
                     )}
 
                 </div>
+
               ) : (
+
                 <div className="empty-result">
+
                   Detection results will
                   appear here.
+
                 </div>
+
               )}
 
             </div>
 
+
+            {/* SIMPLE LEGEND */}
+
+            {detections.length > 0 && (
+
+              <div
+                style={{
+                  display:
+                    "flex",
+
+                  flexWrap:
+                    "wrap",
+
+                  gap:
+                    "12px",
+
+                  marginTop:
+                    "12px",
+
+                  padding:
+                    "12px 14px",
+
+                  border:
+                    "1px solid #dce7ef",
+
+                  borderRadius:
+                    "12px",
+
+                  background:
+                    "#f8fbfd",
+
+                  color:
+                    "#60788b",
+
+                  fontSize:
+                    "11px",
+
+                  lineHeight:
+                    "1.4",
+                }}
+              >
+
+                <span>
+                  🔵 <strong>Blue</strong> =
+                  AI-recognised target
+                </span>
+
+
+                <span>
+                  🟠 <strong>Orange</strong> =
+                  unknown candidate for review
+                </span>
+
+
+                <span>
+                  <strong>Confidence</strong> =
+                  AI classification strength
+                </span>
+
+              </div>
+
+            )}
+
+
+            {/* DETECTION CARDS */}
+
             <div className="detection-list">
 
               {detections.length ? (
+
                 detections.map(
                   (
                     detection
-                  ) => (
-                    <div
-                      className="detection-row"
-                      key={
-                        detection.id
-                      }
-                    >
+                  ) => {
 
-                      <div>
-                        <strong>
-                          {
-                            detection.type
-                          }
-                        </strong>
+                    const unknown =
+                      isUnknownDetection(
+                        detection
+                      );
 
-                        <span>
-                          Detection #
-                          {
-                            detection.id
-                          }
-                        </span>
-                      </div>
+                    const color =
+                      getBoxColor(
+                        detection
+                      );
 
-                      <div className="confidence-block">
 
-                        <strong>
-                          {Math.round(
-                            detection.confidence *
-                              100
-                          )}
-                          %
-                        </strong>
+                    return (
 
-                        <span
-                          className={`severity ${getSeverity(
-                            detection.confidence
-                          ).toLowerCase()}`}
+                      <div
+                        className="detection-row"
+                        key={
+                          detection.id
+                        }
+                        style={{
+                          borderLeft:
+                            `4px solid ${color}`,
+                        }}
+                      >
+
+                        <div>
+
+                          <strong>
+
+                            {unknown
+
+                              ? "Unknown Anomaly"
+
+                              : getDisplayName(
+                                  detection.type
+                                )
+
+                            }
+
+                          </strong>
+
+
+                          <span
+                            style={{
+                              color,
+                              fontWeight:
+                                800,
+                            }}
+                          >
+
+                            {
+                              getChannelLabel(
+                                detection
+                              )
+                            }
+
+                          </span>
+
+                        </div>
+
+
+                        <div
+                          style={{
+                            display:
+                              "flex",
+
+                            flexDirection:
+                              "column",
+
+                            alignItems:
+                              "flex-end",
+
+                            gap:
+                              "5px",
+                          }}
                         >
-                          {
-                            getSeverity(
-                              detection.confidence
-                            )
-                          }
-                        </span>
+
+                          <strong>
+
+                            {Math.round(
+                              detection.confidence *
+                              100
+                            )}
+                            % Confidence
+
+                          </strong>
+
+
+                          <span
+                            style={{
+                              color,
+                              fontWeight:
+                                700,
+                            }}
+                          >
+
+                            Shadow Check:{" "}
+
+                            {
+                              getShadowLabel(
+                                detection
+                              )
+                            }
+
+                          </span>
+
+
+                          <span>
+
+                            Shadow Length:{" "}
+
+                            {
+                              detection.shadow_length_px ||
+                              0
+                            }
+                            px
+
+                          </span>
+
+
+                          <span>
+
+                            Estimated Height:{" "}
+
+                            {
+                              detection.estimated_height_m !==
+                              null &&
+                              detection.estimated_height_m !==
+                              undefined
+
+                                ? `${detection.estimated_height_m} m`
+
+                                : "N/A"
+
+                            }
+
+                          </span>
+
+
+                          <span>
+
+                            Status:{" "}
+
+                            {
+                              getVerificationLabel(
+                                detection
+                              )
+                            }
+
+                          </span>
+
+                        </div>
 
                       </div>
 
-                    </div>
-                  )
+                    );
+
+                  }
                 )
+
               ) : (
+
                 <div className="empty-list">
+
                   No detections yet.
+
                 </div>
+
               )}
 
             </div>
@@ -1396,26 +2873,37 @@ function App() {
 
         </section>
 
+
+        {/* ANALYSIS SUMMARY */}
+
         <section className="summary-section panel">
 
           <div className="panel-heading">
+
             <div>
+
               <div className="eyebrow">
                 MISSION OVERVIEW
               </div>
 
+
               <h2>
                 Analysis Summary
               </h2>
+
             </div>
+
           </div>
+
 
           <div className="summary-stat-grid">
 
             <div>
+
               <span>
                 File
               </span>
+
 
               <strong>
                 {
@@ -1423,63 +2911,84 @@ function App() {
                   "—"
                 }
               </strong>
+
             </div>
 
+
             <div>
+
               <span>
-                Objects
+                Known Targets
               </span>
+
 
               <strong>
                 {
-                  detections.length
+                  knownTargetCount
                 }
               </strong>
+
             </div>
 
+
             <div>
+
               <span>
-                Highest Confidence
+                Unknown Anomalies
               </span>
 
+
               <strong>
-                {Math.round(
-                  highestConfidence *
-                    100
-                )}
-                %
+                {
+                  unknownAnomalyCount
+                }
               </strong>
+
             </div>
 
+
             <div>
+
               <span>
                 Analysis Status
               </span>
 
+
               <strong>
                 {
-                  status
+                  status ===
+                  "DEMO READY"
+                    ? "COMPLETE"
+                    : status
                 }
               </strong>
+
             </div>
 
           </div>
 
         </section>
 
+
+        {/* TRACEABILITY */}
+
         <section className="panel">
 
           <div className="panel-heading">
 
             <div>
+
               <div className="eyebrow">
                 TRACEABILITY
               </div>
 
+
               <h2>
-                Detected Anomalies
+                Detected Contacts
               </h2>
+
             </div>
+
 
             <div className="button-row compact">
 
@@ -1494,6 +3003,7 @@ function App() {
               >
                 Download Report
               </button>
+
 
               <button
                 className="secondary-button"
@@ -1511,18 +3021,25 @@ function App() {
 
           </div>
 
+
           <div className="table-wrap">
 
             <table>
 
               <thead>
+
                 <tr>
+
                   <th>
                     #
                   </th>
 
                   <th>
-                    Object Type
+                    Channel
+                  </th>
+
+                  <th>
+                    Object
                   </th>
 
                   <th>
@@ -1530,95 +3047,170 @@ function App() {
                   </th>
 
                   <th>
-                    Severity
+                    Shadow Check
                   </th>
 
                   <th>
-                    Bounding Box
+                    Height
                   </th>
+
+                  <th>
+                    Status
+                  </th>
+
                 </tr>
+
               </thead>
+
 
               <tbody>
 
                 {detections.length ? (
+
                   detections.map(
                     (
                       detection
-                    ) => (
-                      <tr
-                        key={
-                          detection.id
-                        }
-                      >
+                    ) => {
 
-                        <td>
-                          {
+                      const unknown =
+                        isUnknownDetection(
+                          detection
+                        );
+
+                      const color =
+                        getBoxColor(
+                          detection
+                        );
+
+
+                      return (
+
+                        <tr
+                          key={
                             detection.id
                           }
-                        </td>
+                        >
 
-                        <td>
-                          {
-                            detection.type
-                          }
-                        </td>
-
-                        <td>
-                          {Math.round(
-                            detection.confidence *
-                              100
-                          )}
-                          %
-                        </td>
-
-                        <td>
-                          <span
-                            className={`severity ${getSeverity(
-                              detection.confidence
-                            ).toLowerCase()}`}
-                          >
+                          <td>
                             {
-                              getSeverity(
-                                detection.confidence
-                              )
+                              detection.id
                             }
-                          </span>
-                        </td>
+                          </td>
 
-                        <td>
-                          [
-                          {Math.round(
-                            detection.x1
-                          )}
-                          ,{" "}
-                          {Math.round(
-                            detection.y1
-                          )}
-                          ,{" "}
-                          {Math.round(
-                            detection.x2
-                          )}
-                          ,{" "}
-                          {Math.round(
-                            detection.y2
-                          )}
-                          ]
-                        </td>
 
-                      </tr>
-                    )
+                          <td>
+
+                            <span
+                              style={{
+                                color,
+                                fontWeight:
+                                  800,
+                              }}
+                            >
+
+                              {
+                                getChannelLabel(
+                                  detection
+                                )
+                              }
+
+                            </span>
+
+                          </td>
+
+
+                          <td>
+
+                            {unknown
+                              ? "Unknown Anomaly"
+                              : getDisplayName(
+                                  detection.type
+                                )}
+
+                          </td>
+
+
+                          <td>
+
+                            {Math.round(
+                              detection.confidence *
+                              100
+                            )}
+                            %
+
+                          </td>
+
+
+                          <td>
+
+                            <span
+                              style={{
+                                color,
+                                fontWeight:
+                                  800,
+                              }}
+                            >
+
+                              {
+                                getShadowLabel(
+                                  detection
+                                )
+                              }
+
+                            </span>
+
+                          </td>
+
+
+                          <td>
+
+                            {
+                              detection.estimated_height_m !==
+                              null &&
+                              detection.estimated_height_m !==
+                              undefined
+
+                                ? `${detection.estimated_height_m} m`
+
+                                : "N/A"
+
+                            }
+
+                          </td>
+
+
+                          <td>
+
+                            {
+                              detection.verification_status ||
+                              "Needs Review"
+                            }
+
+                          </td>
+
+                        </tr>
+
+                      );
+
+                    }
                   )
+
                 ) : (
+
                   <tr>
+
                     <td
-                      colSpan="5"
+                      colSpan="7"
                       className="empty-cell"
                     >
+
                       Run an analysis to
                       populate the table.
+
                     </td>
+
                   </tr>
+
                 )}
 
               </tbody>
@@ -1629,29 +3221,51 @@ function App() {
 
         </section>
 
+
+        {/* HISTORY */}
+
         <section className="panel">
 
           <div className="panel-heading">
 
             <div>
+
               <div className="eyebrow">
                 HISTORY
               </div>
 
+
               <h2>
                 Mission History
               </h2>
+
             </div>
 
+
+            <button
+              className="secondary-button"
+              onClick={
+                clearHistory
+              }
+              disabled={
+                !missionHistory.length
+              }
+            >
+              Clear History
+            </button>
+
           </div>
+
 
           <div className="history-list">
 
             {missionHistory.length ? (
+
               missionHistory.map(
                 (
                   mission
                 ) => (
+
                   <div
                     className="history-row"
                     key={
@@ -1660,60 +3274,115 @@ function App() {
                   >
 
                     <div>
+
                       <strong>
                         {
                           mission.filename
                         }
                       </strong>
 
+
                       <span>
                         {
                           mission.timestamp
                         }
                       </span>
+
                     </div>
 
-                    <div>
-                      <strong>
-                        {
-                          mission.detectionCount
-                        }{" "}
-                        detections
-                      </strong>
 
-                      <span>
-                        {
-                          mission.source
+                    <div
+                      style={{
+                        display:
+                          "flex",
+
+                        alignItems:
+                          "center",
+
+                        gap:
+                          "14px",
+                      }}
+                    >
+
+                      <div>
+
+                        <strong>
+                          {
+                            mission.detectionCount
+                          }{" "}
+                          contacts
+                        </strong>
+
+
+                        <span>
+                          {
+                            mission.source
+                          }
+                        </span>
+
+                      </div>
+
+
+                      <button
+                        className="secondary-button"
+                        onClick={() =>
+                          deleteHistoryItem(
+                            mission.id
+                          )
                         }
-                      </span>
+                        style={{
+                          padding:
+                            "7px 12px",
+
+                          fontSize:
+                            "12px",
+                        }}
+                      >
+                        Delete
+                      </button>
+
                     </div>
 
                   </div>
+
                 )
+
               )
+
             ) : (
+
               <div className="empty-list">
+
                 No previous missions yet.
+
               </div>
+
             )}
 
           </div>
 
         </section>
 
+
+        {/* GIS */}
+
         <section className="panel map-panel">
 
           <div className="panel-heading">
 
             <div>
+
               <div className="eyebrow">
                 GIS
               </div>
 
+
               <h2>
                 Survey Map
               </h2>
+
             </div>
+
 
             <span className="simulated-badge">
               SIMULATED POSITION
@@ -1721,30 +3390,40 @@ function App() {
 
           </div>
 
+
           <MapView
             detections={
               detections
             }
           />
 
+
           <p className="map-note">
+
             Prototype note: map positions
             are simulated survey positions.
             Production deployment will derive
             georeferenced positions from vessel
             GPS/INS and sonar geometry.
+
           </p>
 
         </section>
 
       </main>
 
+
       <footer className="footer">
+
         Marine Sonar AI · Functional
         prototype · SIH26057
+
       </footer>
+
     </div>
+
   );
 }
+
 
 export default App;

@@ -1,305 +1,404 @@
-import {
-  MapContainer,
-  TileLayer,
-  Marker,
-  Popup,
-  Polyline,
-} from "react-leaflet";
-
-import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
-/*
-  These coordinates represent a SIMULATED marine survey.
-  They are not extracted from the sonar image.
-*/
-const surveyTrack = [
+import L from "leaflet";
+
+import {
+  MapContainer,
+  Marker,
+  Polyline,
+  Popup,
+  TileLayer,
+  useMap,
+} from "react-leaflet";
+
+import { useEffect } from "react";
+
+const CENTER = [
+  15.20,
+  72.75,
+];
+
+const TRACK = [
   [15.12, 72.55],
-  [15.14, 72.60],
-  [15.16, 72.65],
-  [15.18, 72.70],
-  [15.20, 72.75],
-  [15.22, 72.80],
-  [15.24, 72.85],
-  [15.26, 72.90],
+  [15.14, 72.61],
+  [15.16, 72.67],
+  [15.18, 72.73],
+  [15.20, 72.79],
+  [15.22, 72.85],
+  [15.25, 72.90],
   [15.28, 72.95],
 ];
 
-/*
-  Create a marker according to the detected object type.
-*/
-const createDetectionIcon = (type) => {
-  let symbol = "!";
+const OFFSETS = [
+  [0.005, 0.005],
+  [-0.004, 0.008],
+  [0.006, -0.006],
+  [-0.006, -0.004],
+];
 
-  if (type === "shipwreck") {
-    symbol = "S";
-  } else if (type === "mine_cylinder") {
-    symbol = "M";
-  } else if (type === "ghost_net") {
-    symbol = "N";
-  } else if (type === "submarine_pipeline") {
-    symbol = "P";
+function markerLetter(type) {
+  const value =
+    String(
+      type || ""
+    ).toLowerCase();
+
+  if (
+    value.includes(
+      "mine"
+    )
+  ) {
+    return "M";
   }
 
-  return new L.DivIcon({
-    className: "custom-marker",
+  if (
+    value.includes(
+      "shipwreck"
+    )
+  ) {
+    return "S";
+  }
+
+  if (
+    value.includes(
+      "ghost"
+    )
+  ) {
+    return "N";
+  }
+
+  if (
+    value.includes(
+      "pipeline"
+    )
+  ) {
+    return "P";
+  }
+
+  return "A";
+}
+
+function markerTitle(type) {
+  const value =
+    String(
+      type || ""
+    ).toLowerCase();
+
+  if (
+    value.includes(
+      "mine"
+    )
+  ) {
+    return "Mine Cylinder";
+  }
+
+  if (
+    value.includes(
+      "shipwreck"
+    )
+  ) {
+    return "Shipwreck";
+  }
+
+  if (
+    value.includes(
+      "ghost"
+    )
+  ) {
+    return "Ghost Net";
+  }
+
+  if (
+    value.includes(
+      "pipeline"
+    )
+  ) {
+    return "Submarine Pipeline";
+  }
+
+  return "Anomaly";
+}
+
+function createIcon(
+  type
+) {
+  const letter =
+    markerLetter(type);
+
+  return L.divIcon({
+    className:
+      "sonar-map-marker-wrap",
 
     html: `
       <div
-        class="map-marker"
-        title="${type}"
+        class="sonar-map-marker"
+        aria-label="${markerTitle(
+          type
+        )}"
       >
-        ${symbol}
+        ${letter}
       </div>
     `,
 
-    iconSize: [34, 34],
-    iconAnchor: [17, 17],
+    iconSize: [
+      38,
+      38,
+    ],
+
+    iconAnchor: [
+      19,
+      19,
+    ],
+
+    popupAnchor: [
+      0,
+      -20,
+    ],
   });
-};
+}
 
-function MapView({ detections }) {
+function RecenterMap({
+  markers,
+}) {
+  const map =
+    useMap();
 
-  /*
-    Use the middle of the simulated survey
-    as the initial map position.
-  */
-  const center = [15.20, 72.75];
+  useEffect(() => {
+    if (!markers.length) {
+      map.setView(
+        CENTER,
+        10
+      );
 
-  /*
-    Match detections to positions along the survey track.
-
-    If there are more detections than track points,
-    the last available position is reused.
-  */
-  const detectionPositions = detections.map(
-    (detection, index) => {
-
-      const positionIndex =
-        Math.min(
-          index + 3,
-          surveyTrack.length - 1
-        );
-
-      return {
-        ...detection,
-        latitude:
-          surveyTrack[positionIndex][0],
-        longitude:
-          surveyTrack[positionIndex][1],
-      };
+      return;
     }
-  );
+
+    const positions =
+      markers.map(
+        (marker) =>
+          marker.position
+      );
+
+    const bounds =
+      L.latLngBounds(
+        positions
+      );
+
+    map.fitBounds(
+      bounds,
+      {
+        padding: [
+          45,
+          45,
+        ],
+
+        maxZoom: 11,
+      }
+    );
+  }, [
+    markers,
+    map,
+  ]);
+
+  return null;
+}
+
+export default function MapView({
+  detections = [],
+}) {
+  const markers =
+    detections.map(
+      (
+        detection,
+        index
+      ) => {
+        const base =
+          TRACK[
+            (index + 3) %
+              TRACK.length
+          ];
+
+        const offset =
+          OFFSETS[
+            index %
+              OFFSETS.length
+          ];
+
+        return {
+          ...detection,
+
+          position: [
+            base[0] +
+              offset[0],
+
+            base[1] +
+              offset[1],
+          ],
+        };
+      }
+    );
 
   return (
-    <section className="map-section">
+    <div className="map-container">
 
-      {/* ================= MAP HEADER ================= */}
-
-      <div className="map-header">
-
-        <div>
-
-          <span className="eyebrow">
-            GEOSPATIAL ANALYSIS
-          </span>
-
-          <h2>
-            GIS Detection Map
-          </h2>
-
-          <p>
-            Detected anomalies plotted along the
-            simulated survey track.
-          </p>
-
-        </div>
-
-        <span className="demo-location">
-          SIMULATED POSITION
+      <div className="map-title-overlay">
+        <span>
+          GEOSPATIAL ANALYSIS
         </span>
 
+        <strong>
+          GIS Detection Map
+        </strong>
+
+        <small>
+          Detected anomalies plotted
+          along the simulated survey track.
+        </small>
       </div>
 
-      {/* ================= MAP LEGEND ================= */}
+      <MapContainer
+        center={
+          CENTER
+        }
+        zoom={10}
+        scrollWheelZoom={
+          true
+        }
+        className="sonar-map"
+      >
+
+        <TileLayer
+          attribution="&copy; OpenStreetMap contributors"
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+
+        <Polyline
+          positions={
+            TRACK
+          }
+          pathOptions={{
+            color:
+              "#1769aa",
+
+            weight: 4,
+
+            opacity: 0.85,
+
+            dashArray:
+              "10 8",
+          }}
+        />
+
+        <RecenterMap
+          markers={
+            markers
+          }
+        />
+
+        {markers.map(
+          (
+            marker
+          ) => (
+            <Marker
+              key={
+                marker.id
+              }
+              position={
+                marker.position
+              }
+              icon={createIcon(
+                marker.type
+              )}
+            >
+
+              <Popup>
+
+                <div className="map-popup">
+
+                  <strong>
+                    {
+                      markerTitle(
+                        marker.type
+                      )
+                    }
+                  </strong>
+
+                  <span>
+                    Confidence:{" "}
+                    {Math.round(
+                      marker.confidence *
+                        100
+                    )}
+                    %
+                  </span>
+
+                  <span>
+                    Latitude:{" "}
+                    {marker.position[0].toFixed(
+                      4
+                    )}
+                  </span>
+
+                  <span>
+                    Longitude:{" "}
+                    {marker.position[1].toFixed(
+                      4
+                    )}
+                  </span>
+
+                  <small>
+                    Simulated survey position
+                  </small>
+
+                </div>
+
+              </Popup>
+
+            </Marker>
+          )
+        )}
+
+      </MapContainer>
 
       <div className="map-legend">
 
-        <strong>
-          Legend
-        </strong>
-
         <span>
-          <span className="legend-marker">
+          <b className="legend-m">
             M
-          </span>
+          </b>
           Mine Cylinder
         </span>
 
         <span>
-          <span className="legend-marker">
+          <b className="legend-s">
             S
-          </span>
+          </b>
           Shipwreck
         </span>
 
         <span>
-          <span className="legend-marker">
+          <b className="legend-n">
             N
-          </span>
+          </b>
           Ghost Net
         </span>
 
         <span>
-          <span className="legend-marker">
+          <b className="legend-p">
             P
-          </span>
+          </b>
           Submarine Pipeline
         </span>
 
       </div>
 
-      {/* ================= MAP ================= */}
-
-      <div className="map-container">
-
-        <MapContainer
-          center={center}
-          zoom={8}
-          scrollWheelZoom={true}
-          style={{
-            height: "100%",
-            width: "100%",
-          }}
-        >
-
-          {/* BASE MAP */}
-
-          <TileLayer
-            attribution="&copy; OpenStreetMap contributors"
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-
-          {/* SIMULATED SURVEY TRACK */}
-
-          <Polyline
-            positions={surveyTrack}
-            pathOptions={{
-              color: "#1976d2",
-              weight: 4,
-              opacity: 0.85,
-              dashArray: "8 8",
-            }}
-          />
-
-          {/* DETECTION MARKERS */}
-
-          {detectionPositions.map(
-            (detection, index) => {
-
-              const {
-                latitude,
-                longitude,
-              } = detection;
-
-              return (
-                <Marker
-                  key={index}
-                  position={[
-                    latitude,
-                    longitude,
-                  ]}
-                  icon={createDetectionIcon(
-                    detection.type
-                  )}
-                >
-
-                  <Popup>
-
-                    <div className="popup-content">
-
-                      <h3>
-                        {detection.type}
-                      </h3>
-
-                      <p>
-                        <strong>
-                          Detection:
-                        </strong>{" "}
-                        #{index + 1}
-                      </p>
-
-                      <p>
-                        <strong>
-                          Confidence:
-                        </strong>{" "}
-                        {(
-                          detection.confidence *
-                          100
-                        ).toFixed(0)}
-                        %
-                      </p>
-
-                      <p>
-                        <strong>
-                          Latitude:
-                        </strong>{" "}
-                        {latitude.toFixed(4)}
-                      </p>
-
-                      <p>
-                        <strong>
-                          Longitude:
-                        </strong>{" "}
-                        {longitude.toFixed(4)}
-                      </p>
-
-                      <span className="popup-demo">
-                        Simulated survey position
-                      </span>
-
-                    </div>
-
-                  </Popup>
-
-                </Marker>
-              );
-            }
-          )}
-
-        </MapContainer>
-
-      </div>
-
-      {/* ================= MAP FOOTNOTE ================= */}
-
-      <div className="map-note">
-
-        <span>
-          ●
-        </span>
-
-        <div>
-          <strong>
-            Survey Track
-          </strong>
-
-          <p>
-            Blue dashed line represents the
-            simulated vessel survey path.
-          </p>
+      {!markers.length && (
+        <div className="map-empty-overlay">
+          Run an analysis to place
+          detected targets on the
+          survey map.
         </div>
+      )}
 
-        <div className="map-disclaimer">
-          Coordinates are simulated for the MVP.
-          Actual deployment will use vessel GPS/INS
-          and sonar geometry for georeferencing.
-        </div>
-
-      </div>
-
-    </section>
+    </div>
   );
 }
-
-export default MapView;

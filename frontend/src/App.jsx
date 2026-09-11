@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
+import { Client, handle_file } from "@gradio/client";
 import "./App.css";
 import MapView from "./MapView";
+
+const HF_SPACE = "awzsxde/marine-sonar-ai";
 
 function App() {
   const [file, setFile] = useState(null);
@@ -51,81 +54,91 @@ function App() {
 
     const startTime = performance.now();
 
-    const formData = new FormData();
-    formData.append("file", file);
-
     try {
-      const response = await fetch(
-        "http://127.0.0.1:8000/detect",
-        {
-          method: "POST",
-          body: formData,
-        }
-      );
+      const app = await Client.connect(HF_SPACE);
 
-      if (!response.ok) {
-        throw new Error("Detection failed");
-      }
-
-      const data = await response.json();
+      const response = await app.predict("/predict", [
+        handle_file(file),
+      ]);
 
       const processingTime = (
         (performance.now() - startTime) /
         1000
       ).toFixed(2);
 
+      const detectionData = response.data[1];
+
+      let data = detectionData;
+
+      if (typeof detectionData === "string") {
+        data = JSON.parse(detectionData);
+      }
+
+      const detections = Array.isArray(data?.detections)
+        ? data.detections
+        : [];
+
+      const detectionCount =
+        Number(data?.detection_count) || detections.length;
+
+      const imageWidth =
+        Number(data?.image_width) || 1;
+
+      const imageHeight =
+        Number(data?.image_height) || 1;
+
       const highestConfidence =
-        data.detections.length > 0
+        detections.length > 0
           ? Math.max(
-              ...data.detections.map(
-                (detection) => detection.confidence
+              ...detections.map(
+                (detection) =>
+                  Number(detection.confidence) || 0
               )
             )
           : 0;
 
-      const anomalyTypes =
-        data.detections.length > 0
-          ? [
-              ...new Set(
-                data.detections.map(
-                  (detection) => detection.type
-                )
-              ),
-            ]
-          : [];
+      const uniqueObjects = [
+        ...new Set(
+          detections.map(
+            (detection) => detection.type
+          )
+        ),
+      ];
 
       const objectTypes =
-        anomalyTypes.length > 0
-          ? anomalyTypes.join(", ")
+        uniqueObjects.length > 0
+          ? uniqueObjects.join(", ")
           : "None";
+
+      const missionNumber =
+        missionHistory.length + 1;
 
       const mission = {
         id: Date.now(),
-        missionNumber:
-          missionHistory.length + 1,
-        filename: data.filename,
-        detectionCount:
-          data.detection_count,
+        missionNumber,
+        filename: file.name,
+        detectionCount,
         highestConfidence,
-        anomalyTypes:
-          anomalyTypes.length,
+        anomalyTypes: uniqueObjects.length,
         objectTypes,
         status:
-          data.detection_count > 0
+          detectionCount > 0
             ? "Anomaly Detected"
             : "Clear",
         processingTime,
         timestamp:
           new Date().toLocaleString(),
-        detections:
-          data.detections,
+        detections,
       };
 
       setResult({
-        ...data,
+        filename: file.name,
+        image_width: imageWidth,
+        image_height: imageHeight,
+        detection_count: detectionCount,
+        detections,
         processing_time: processingTime,
-        mission_number:
-          mission.missionNumber,
+        mission_number: missionNumber,
       });
 
       setMissionHistory(
@@ -135,9 +148,11 @@ function App() {
         ]
       );
     } catch (error) {
+      console.error("Hugging Face error:", error);
+
       setResult({
         error:
-          "Unable to connect to the AI backend.",
+          "Unable to connect to the AI service. Please try again."
       });
     }
 
@@ -160,7 +175,7 @@ function App() {
       ? Math.max(
           ...result.detections.map(
             (detection) =>
-              detection.confidence
+              Number(detection.confidence) || 0
           )
         )
       : 0;
@@ -215,11 +230,6 @@ function App() {
       source_image:
         result.filename,
 
-      image_dimensions: {
-        width: result.image_width,
-        height: result.image_height,
-      },
-
       detection_summary: {
         total_detections:
           result.detection_count,
@@ -256,7 +266,8 @@ function App() {
 
               confidence:
                 `${(
-                  detection.confidence * 100
+                  detection.confidence *
+                  100
                 ).toFixed(0)}%`,
 
               severity:
@@ -283,7 +294,7 @@ function App() {
         ),
 
       geolocation_status:
-        "Demonstration coordinates used in the current MVP.",
+        "Demonstration coordinates are used in the current MVP.",
     };
 
     const blob = new Blob(
@@ -455,12 +466,6 @@ function App() {
               color: #7b8794;
               font-size: 12px;
             }
-
-            @media print {
-              body {
-                padding: 20px;
-              }
-            }
           </style>
         </head>
 
@@ -569,8 +574,8 @@ function App() {
 
           <div class="geo-note">
             Geolocation status:
-            demonstration coordinates are
-            used in the current MVP.
+            demonstration coordinates are used
+            in the current MVP.
           </div>
 
           <div class="footer">
@@ -582,6 +587,7 @@ function App() {
     `);
 
     printWindow.document.close();
+
     printWindow.focus();
 
     setTimeout(() => {
@@ -592,8 +598,6 @@ function App() {
   return (
     <div className="app">
 
-      {/* ================= HEADER ================= */}
-
       <header className="header">
 
         <div className="brand">
@@ -603,6 +607,7 @@ function App() {
           </div>
 
           <div>
+
             <h1>
               Marine Sonar AI
             </h1>
@@ -611,6 +616,7 @@ function App() {
               Underwater Marine Debris &
               Anomaly Detection
             </p>
+
           </div>
 
         </div>
@@ -620,20 +626,20 @@ function App() {
           <span className="status-dot"></span>
 
           <div>
+
             <strong>
               AI System Online
             </strong>
 
             <span>
-              YOLO Sonar Detection
+              Hugging Face · YOLO Sonar
             </span>
+
           </div>
 
         </div>
 
       </header>
-
-      {/* ================= PIPELINE ================= */}
 
       <section className="pipeline">
 
@@ -672,17 +678,14 @@ function App() {
 
       </section>
 
-      {/* ================= MAIN DASHBOARD ================= */}
-
       <main className="dashboard">
-
-        {/* ================= UPLOAD ================= */}
 
         <section className="panel">
 
           <div className="section-heading">
 
             <div>
+
               <span className="eyebrow">
                 INPUT
               </span>
@@ -690,6 +693,7 @@ function App() {
               <h2>
                 Sonar Analysis
               </h2>
+
             </div>
 
             <span className="live-badge">
@@ -788,6 +792,7 @@ function App() {
           <div className="model-info">
 
             <div>
+
               <span>
                 MODEL
               </span>
@@ -795,9 +800,11 @@ function App() {
               <strong>
                 YOLOv8 Sonar
               </strong>
+
             </div>
 
             <div>
+
               <span>
                 OUTPUT
               </span>
@@ -805,29 +812,31 @@ function App() {
               <strong>
                 Object Detection
               </strong>
+
             </div>
 
             <div>
+
               <span>
-                RESPONSE
+                HOST
               </span>
 
               <strong>
-                FastAPI
+                Hugging Face
               </strong>
+
             </div>
 
           </div>
 
         </section>
 
-        {/* ================= RESULTS ================= */}
-
         <section className="panel">
 
           <div className="section-heading">
 
             <div>
+
               <span className="eyebrow">
                 OUTPUT
               </span>
@@ -835,6 +844,7 @@ function App() {
               <h2>
                 Detection Results
               </h2>
+
             </div>
 
             {result &&
@@ -879,7 +889,7 @@ function App() {
               </p>
 
               <span>
-                Running AI detection model.
+                Connecting to hosted AI model.
               </span>
 
             </div>
@@ -1062,8 +1072,6 @@ function App() {
 
       </main>
 
-      {/* ================= CURRENT ANALYSIS ================= */}
-
       {result &&
         !result.error && (
 
@@ -1072,6 +1080,7 @@ function App() {
             <div className="mission-header">
 
               <div>
+
                 <span className="eyebrow">
                   CURRENT MISSION
                 </span>
@@ -1083,6 +1092,7 @@ function App() {
                 <p>
                   Overview of the current sonar analysis.
                 </p>
+
               </div>
 
               <div
@@ -1102,6 +1112,7 @@ function App() {
             <div className="summary-grid">
 
               <div className="summary-card">
+
                 <span>
                   Total Detections
                 </span>
@@ -1109,9 +1120,11 @@ function App() {
                 <strong>
                   {result.detection_count}
                 </strong>
+
               </div>
 
               <div className="summary-card">
+
                 <span>
                   Highest Confidence
                 </span>
@@ -1123,9 +1136,11 @@ function App() {
                   ).toFixed(0)}
                   %
                 </strong>
+
               </div>
 
               <div className="summary-card">
+
                 <span>
                   Anomaly Types
                 </span>
@@ -1133,9 +1148,11 @@ function App() {
                 <strong>
                   {anomalyTypes}
                 </strong>
+
               </div>
 
               <div className="summary-card">
+
                 <span>
                   Processing Time
                 </span>
@@ -1143,6 +1160,7 @@ function App() {
                 <strong>
                   {result.processing_time}s
                 </strong>
+
               </div>
 
             </div>
@@ -1173,8 +1191,6 @@ function App() {
 
         )}
 
-      {/* ================= DETECTION TABLE ================= */}
-
       {result &&
         !result.error &&
         result.detection_count > 0 && (
@@ -1184,6 +1200,7 @@ function App() {
             <div className="mission-header">
 
               <div>
+
                 <span className="eyebrow">
                   AI OUTPUT
                 </span>
@@ -1193,9 +1210,9 @@ function App() {
                 </h2>
 
                 <p>
-                  Objects identified in the current
-                  sonar image.
+                  Objects identified in the current sonar image.
                 </p>
+
               </div>
 
             </div>
@@ -1274,13 +1291,12 @@ function App() {
 
         )}
 
-      {/* ================= MISSION HISTORY ================= */}
-
       <section className="mission-summary">
 
         <div className="mission-header">
 
           <div>
+
             <span className="eyebrow">
               HISTORY
             </span>
@@ -1292,6 +1308,7 @@ function App() {
             <p>
               Previous sonar analyses stored in this browser.
             </p>
+
           </div>
 
           {missionHistory.length > 0 && (
@@ -1450,8 +1467,6 @@ function App() {
 
       </section>
 
-      {/* ================= GIS MAP ================= */}
-
       {result &&
         !result.error &&
         result.detection_count > 0 && (
@@ -1464,11 +1479,10 @@ function App() {
 
         )}
 
-      {/* ================= FOOTER ================= */}
-
       <footer className="footer">
 
         <div>
+
           <strong>
             Marine Sonar AI
           </strong>
@@ -1476,6 +1490,7 @@ function App() {
           <span>
             AI-powered side-scan sonar analysis
           </span>
+
         </div>
 
         <span>
